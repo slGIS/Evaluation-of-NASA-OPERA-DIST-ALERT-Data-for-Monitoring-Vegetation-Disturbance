@@ -1,0 +1,2 @@
+# Evaluation-of-NASA-OPERA-DIST-ALERT-Data-for-Monitoring-Vegetation-Disturbance
+The Surface Disturbance (DIST) Product detects changes in the Earth’s surface using harmonized and Landsat 8 and Sentinel-2 A/B (HLS) (optical data). DIST-ALERT maps per-pixel vegetation disturbance, specifically, vegetation-cover loss. Vegetation disturbance is mapped when there is an indicated decrease in vegetation cover within an HLS pixel.
