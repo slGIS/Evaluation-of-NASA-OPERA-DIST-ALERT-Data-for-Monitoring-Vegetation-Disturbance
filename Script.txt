@@ -1,0 +1,218 @@
+// ======================================================
+// GLAD HLS Disturbance — September 1–15, 2025 (White AOI fill)
+// + Area by alert confidence (hectares) with evaluated labels
+// ======================================================
+
+// 1) AOI (change path if you want Mwenda_CF)
+var fc  = ee.FeatureCollection('projects/research-project1-472811/assets/mabonga');
+// var fc  = ee.FeatureCollection('projects/research-project1-472811/assets/mabonga');
+var aoi = ee.Geometry(fc.geometry().dissolve());
+
+// 2) GLAD HLSDIST (public) — DATE + COUNT
+var dateRaw  = ee.ImageCollection('projects/glad/HLSDIST/current/VEG-DIST-DATE').mosaic();
+var countRaw = ee.ImageCollection('projects/glad/HLSDIST/current/VEG-DIST-COUNT').mosaic();
+
+var dateImg  = dateRaw.select('b1').updateMask(dateRaw.neq(-1)).rename('date').clip(aoi);
+var countImg = countRaw.select('b1').rename('count').clip(aoi);
+
+// 3) Window: September 2025 (HLSDIST uses days since 2020-12-31)
+var base = ee.Date('2020-12-31');
+var startIdx = ee.Number(ee.Date('2025-09-1').difference(base, 'day'));
+var endIdx   = ee.Number(ee.Date('2025-09-15').difference(base, 'day'));
+
+// 4) Masks
+var inNov = dateImg.gte(startIdx).and(dateImg.lte(endIdx));
+var c1    = countImg.gte(1);                         // preview
+var c23   = countImg.gte(2).and(countImg.lte(3));    // low confidence
+var c4    = countImg.gte(4);                         // high confidence
+
+// 5) High-contrast visualization (white AOI fill)
+var whiteBg = ee.Image.constant(1).visualize({palette: ['ffffff'], opacity: 1});
+var dem  = ee.Image('USGS/SRTMGL1_003');
+var hill = ee.Terrain.hillshade(dem, 315, 45)
+  .visualize({min: 0, max: 255, palette: ['ffffff','eeeeee','dddddd','cccccc'], opacity: 0.55});
+
+// Slightly dilate alerts for visibility
+var previewVis = dateImg.updateMask(inNov.and(c1)).focal_max(1);
+var lowVis     = dateImg.updateMask(inNov.and(c23)).focal_max(1);
+var highVis    = dateImg.updateMask(inNov.and(c4)).focal_max(1);
+
+// Colors
+var PREVIEW = {palette: ['#6b60b3'], opacity: 0.9}; // light purple
+var LOW     = {palette: ['#ff9e00'], opacity: 1.0}; // bright orange
+var HIGH    = {palette: ['#8e0038'], opacity: 1.0}; // magenta/dark red
+
+// 6) Draw
+Map.centerObject(aoi, 12);
+Map.addLayer(whiteBg, {}, 'White background', true);
+Map.addLayer(hill,    {}, 'Relief (light gray)', true);
+
+// ✅ AOI: white fill with black outline
+Map.addLayer(aoi, {color:'red', width:2, fillColor:'ffffff'}, 'AOI boundary (white fill)');
+
+// Alerts on top
+Map.addLayer(previewVis, PREVIEW, 'Preview Nov (count <= 1)');
+Map.addLayer(lowVis,     LOW,     'Low confidence (2–3)');
+Map.addLayer(highVis,    HIGH,    'High confidence (≥4)');
+
+// 7) AREA CALCULATIONS (ha)
+var areaHa = ee.Image.pixelArea().divide(10000);  // m² → ha
+var previewArea = areaHa.updateMask(inNov.and(c1));
+var lowArea     = areaHa.updateMask(inNov.and(c23));
+var highArea    = areaHa.updateMask(inNov.and(c4));
+
+var scale = 30; // you can also use: dateImg.projection().nominalScale()
+var regionReducer = {
+  reducer: ee.Reducer.sum(),
+  geometry: aoi,
+  scale: scale,
+  maxPixels: 1e13,
+  bestEffort: true
+};
+
+var previewHa = ee.Number(previewArea.reduceRegion(regionReducer).get('area'));
+var lowHa     = ee.Number(lowArea.reduceRegion(regionReducer).get('area'));
+var highHa    = ee.Number(highArea.reduceRegion(regionReducer).get('area'));
+
+// 8) Legend (use evaluate() so labels get client strings)
+var legend = ui.Panel({style:{position:'bottom-left', backgroundColor:'white', padding:'8px'}});
+legend.add(ui.Label('GLAD HLS Disturbance — September 2025', {fontWeight:'bold'}));
+legend.add(ui.Label({value:'Preview (count <=1): light purple', style:{color:'#6b60b3'}}));
+legend.add(ui.Label({value:'Low confidence (2–3): orange',     style:{color:'#ff9e00'}}));
+legend.add(ui.Label({value:'High confidence (≥4): magenta',    style:{color:'#8e0038'}}));
+legend.add(ui.Label(' '));
+legend.add(ui.Label('Area (ha):', {fontWeight:'bold'}));
+
+// Helper: format ee.Number → string and append a ui.Label
+function addAreaLabel(title, color, eeNum) {
+  eeNum.format('%,.1f').evaluate(function(valStr) {
+    legend.add(ui.Label(title + ': ' + (valStr || '0') + ' ha', {color: color}));
+  });
+}
+addAreaLabel('Preview (<=1)', '#6b60b3', previewHa);
+addAreaLabel('Low (2–3)',    '#ff9e00', lowHa);
+addAreaLabel('High (≥4)',    '#8e0038', highHa);
+
+Map.add(legend);
+
+// Also print to Console (server objects are fine here)
+print('Area (ha) —  September25:', {
+  'Low (2–3)': lowHa,
+  'High (≥4)': highHa
+});
+
+// 9) Optional: Export areas as CSV to Drive
+var outFC = ee.FeatureCollection([
+  ee.Feature(null, {'class': 'Preview (<=1)', 'area_ha': previewHa}),
+  ee.Feature(null, {'class': 'Low (2–3)',    'area_ha': lowHa}),
+  ee.Feature(null, {'class': 'High (≥4)',    'area_ha': highHa})
+]);
+Export.table.toDrive({
+  collection: outFC,
+  description: 'HLSDIST_September_1_15_2025_Area_by_conf',
+  fileFormat: 'CSV'
+});
+
+// 10) Build HLSDIST class image (0–3) for    September 1–15, 2025
+// 0 = no alert, 1 = preview (count>=1), 2 = low (2–3), 3 = high (>=4)
+
+var classImg = ee.Image(0)                 // background 0
+  .where(inNov.and(c1), 1)                 // preview
+  .where(inNov.and(c23), 2)                // low
+  .where(inNov.and(c4), 3)                 // high
+  .toByte()
+  .rename('class')
+  .clip(aoi);
+
+// Optional: visualize
+Map.addLayer(
+  classImg,
+  {min: 0, max: 3, palette: ['000000','6b60b3','#ff9e00','#8e0038']},
+  'HLSDIST class September 1–15 (0–3)'
+);
+
+// Export single-band GeoTIFF of classes
+Export.image.toDrive({
+  image: classImg,
+  description: 'HLSDIST_September1_15_2025_class_singleband',
+  folder: 'EarthEngineExports',          // change/remove if you want
+  fileNamePrefix: 'HLSDIST_September1_15_2025_class',
+  region: aoi,
+  scale: 30,
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
+
+// 11) dNBR vs HLSDIST overlap analysis for September 01–15, 2025
+
+// dNBR raster for this fire/event (CHANGE ID IF NEEDED)
+var dnbrImg = ee.Image('projects/research-project1-472811/assets/dNBR1_9_2025')
+  .rename('dnbr')
+  .clip(aoi);
+
+// Mask to pixels where both HLS alert (class>0) and dNBR exist
+var overlapMask   = classImg.gt(0).and(dnbrImg.mask().gt(0));
+var dnbrOverlap   = dnbrImg.updateMask(overlapMask);
+var classOverlap  = classImg.updateMask(overlapMask);
+
+// Visual check of overlap
+Map.addLayer(overlapMask.selfMask(), {palette:['red']}, 'Overlap (HLS alerts ∩ dNBR)');
+
+// Build 2-band image: [dnbr, class] on overlapping pixels
+var combo = dnbrOverlap.addBands(classOverlap);  // bands: dnbr, class
+
+// --- dNBR statistics by HLSDIST class (1,2,3) ---
+var overlapStats = combo.reduceRegion({
+  reducer: ee.Reducer.mean()
+              .combine(ee.Reducer.median(), '', true)
+              .combine(ee.Reducer.min(), '', true)
+              .combine(ee.Reducer.max(), '', true)
+              .combine(ee.Reducer.stdDev(), '', true)
+              .group({
+                groupField: 1,       // band index 1 = class
+                groupName: 'class'
+              }),
+  geometry: aoi,
+  scale: 30,
+  maxPixels: 1e13,
+  bestEffort: true
+});
+
+print('dNBR statistics by HLSDIST class (September 1-15, 2025):', overlapStats);
+
+// --- Per-pixel sampling for EXPORT (with coordinates) ---
+// Keep geometry so we can export to KML for Google Earth Pro
+var samplesWithGeom = combo.sample({
+  region: aoi,
+  scale: 30,
+  geometries: true          // <-- this keeps point geometry
+  // omit numPixels so all overlapping pixels are used
+});
+
+print('Number of overlapping samples:', samplesWithGeom.size());
+print('First overlapping samples:', samplesWithGeom.limit(10));
+
+// Add lon/lat properties (nice for CSV)
+var samplesWithLonLat = samplesWithGeom.map(function(f) {
+  var coords = f.geometry().coordinates();
+  return f.set({
+    lon: coords.get(0),
+    lat: coords.get(1)
+  });
+});
+
+// --- Export table for analysis (CSV with lon/lat) ---
+Export.table.toDrive({
+  collection: samplesWithLonLat,
+  description: 'dNBR_vs_HLSDIST_September1_15_2025_overlap_CSV',
+  fileFormat: 'CSV',
+  selectors: ['lon', 'lat', 'dnbr', 'class']
+});
+
+// --- Export points as KML for Google Earth Pro ---
+Export.table.toDrive({
+  collection: samplesWithGeom,
+  description: 'dNBR_vs_HLSDIST_September1-15_2025_overlap_KML',
+  fileFormat: 'KML'
+  // geometry is automatically included
+});
